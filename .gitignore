@@ -1,0 +1,10 @@
+caddy
+caddy.exe
+*.log
+*.test
+*.out
+.DS_Store
+.idea/
+.vscode/
+vendor/
+dist/

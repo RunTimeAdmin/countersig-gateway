@@ -1,0 +1,46 @@
+version: '3.8'
+
+# Countersig Gateway — Sidecar Deployment
+#
+# In this pattern, each agent pod has its own gateway container alongside it.
+# The agent talks to localhost:8080, the gateway enforces policy and
+# forwards. Provides per-agent isolation and predictable latency.
+#
+# Required environment in your shell or .env:
+#   COUNTERSIG_GATEWAY_API_KEY — service key for /v1/policy/check calls
+#   AGENT_ID                   — UUID of the agent registered in Countersig
+#   AGENT_JWT                  — current Countersig JWT for the agent
+
+services:
+  gateway:
+    image: ghcr.io/runtimeadmin/countersig-gateway:latest
+    container_name: countersig-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # bound to localhost only
+    environment:
+      - COUNTERSIG_GATEWAY_API_KEY=${COUNTERSIG_GATEWAY_API_KEY}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Example agent that uses the gateway as HTTPS_PROXY.
+  # Replace with your real agent image and command.
+  agent:
+    image: your-org/your-agent:latest
+    container_name: agent
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      - HTTPS_PROXY=http://gateway:8080
+      - HTTP_PROXY=http://gateway:8080
+      # NO_PROXY ensures agent-to-gateway traffic itself bypasses proxy chain
+      - NO_PROXY=gateway,127.0.0.1,localhost
+      - COUNTERSIG_AGENT_ID=${AGENT_ID}
+      - COUNTERSIG_AGENT_JWT=${AGENT_JWT}

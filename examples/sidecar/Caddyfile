@@ -1,0 +1,24 @@
+# Countersig Gateway — Sidecar Mode (forward proxy on localhost)
+
+{
+    auto_https off
+    order countersig_policy before forward_proxy
+}
+
+:8080 {
+    countersig_policy {
+        api_base        https://api.countersig.com
+        api_key         {env.COUNTERSIG_GATEWAY_API_KEY}
+        cache_ttl       300
+        fail_mode       closed
+        require_auth    true
+        metrics_path    /metrics
+    }
+
+    forward_proxy {
+        # No basic_auth in sidecar mode — gateway is bound to localhost
+        # only and only the colocated agent reaches it.
+        hide_ip
+        hide_via
+    }
+}

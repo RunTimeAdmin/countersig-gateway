@@ -1,0 +1,42 @@
+# Countersig Gateway — Reverse Proxy Mode
+#
+# In this pattern, agents make HTTP calls to the gateway directly and
+# specify the upstream destination via the X-Target-Upstream header.
+# This works well for sidecar deployments (one gateway per agent pod)
+# or for runtimes that can't easily set HTTPS_PROXY.
+#
+# Agent code:
+#   const res = await fetch('http://gateway:8080/v1/chat/completions', {
+#     headers: {
+#       'Authorization': 'Bearer ' + countersigJWT,
+#       'X-Target-Upstream': 'https://api.openai.com',
+#       'Content-Type': 'application/json',
+#     },
+#     body: JSON.stringify({ ... }),
+#   });
+#
+# The gateway extracts the destination from X-Target-Upstream, runs the
+# policy check, and forwards the request.
+
+{
+    auto_https off
+    order countersig_policy before reverse_proxy
+}
+
+:8080 {
+    countersig_policy {
+        api_base        https://api.countersig.com
+        api_key         {env.COUNTERSIG_GATEWAY_API_KEY}
+        cache_ttl       300
+        fail_mode       closed
+        require_auth    true
+        metrics_path    /metrics
+    }
+
+    # Forward to the upstream specified by the agent in X-Target-Upstream.
+    # Caddy's reverse_proxy directive supports dynamic upstream resolution
+    # via placeholders.
+    reverse_proxy {http.request.header.X-Target-Upstream} {
+        header_up Host {http.reverse_proxy.upstream.hostport}
+    }
+}

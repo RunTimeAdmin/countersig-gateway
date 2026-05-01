@@ -1,0 +1,53 @@
+# Countersig Gateway — Forward Proxy Mode
+#
+# Deploy this in front of your AI agents. Configure agents to use this
+# gateway as their HTTPS_PROXY. All outbound HTTPS calls are policy-checked
+# before being forwarded.
+#
+# Agent configuration:
+#   export HTTPS_PROXY=http://gateway-host:8080
+#   export HTTP_PROXY=http://gateway-host:8080
+#
+# This is the recommended pattern for most deployments — zero code changes
+# in the agent runtime.
+#
+# Required env vars:
+#   COUNTERSIG_GATEWAY_API_KEY — service API key for the gateway itself
+#                                 (separate from per-agent JWTs)
+#
+# Build the binary with forwardproxy support via xcaddy:
+#   xcaddy build \
+#     --with github.com/RunTimeAdmin/countersig-gateway/module \
+#     --with github.com/caddyserver/forwardproxy@caddy2
+
+{
+    auto_https off
+    order countersig_policy before forward_proxy
+}
+
+:8080 {
+    # Policy enforcement runs first
+    countersig_policy {
+        api_base        https://api.countersig.com
+        api_key         {env.COUNTERSIG_GATEWAY_API_KEY}
+        cache_ttl       300
+        cache_size      10000
+        fail_mode       closed
+        require_auth    true
+        request_timeout 5s
+        metrics_path    /metrics
+    }
+
+    # Then forward the request via standard HTTP CONNECT proxy
+    forward_proxy {
+        # Authentication between agents and the gateway. If agents
+        # already authenticate via Bearer JWT for policy purposes,
+        # you can drop basic_auth here. Most deployments still want
+        # network-level auth as defense in depth.
+        basic_auth {env.PROXY_USER} {env.PROXY_PASS}
+
+        # Don't try to act as a transparent HTTP proxy
+        hide_ip
+        hide_via
+    }
+}
