@@ -39,7 +39,7 @@ func newPolicyClient(apiBase, apiKey string, timeout time.Duration) *policyClien
 
 // Check calls POST /v1/policy/check with the given agent_id and destination.
 // Returns the decision or an error on transport/auth failure.
-func (c *policyClient) Check(ctx context.Context, agentID, destination string) (*PolicyDecision, error) {
+func (c *policyClient) Check(ctx context.Context, agentID, destination, apiKeyOverride string) (*PolicyDecision, error) {
 	body, err := json.Marshal(map[string]string{
 		"agent_id":    agentID,
 		"destination": destination,
@@ -53,7 +53,11 @@ func (c *policyClient) Check(ctx context.Context, agentID, destination string) (
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	authKey := c.apiKey
+	if apiKeyOverride != "" {
+		authKey = apiKeyOverride
+	}
+	req.Header.Set("Authorization", "Bearer "+authKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "countersig-gateway/0.1")

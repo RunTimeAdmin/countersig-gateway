@@ -73,9 +73,9 @@ type Handler struct {
 	FailMode FailMode `json:"fail_mode,omitempty"`
 
 	// RequireAuth controls whether requests without a valid agent JWT are
-	// rejected. Default true. Set to false only for trusted homogeneous
-	// fleets where the gateway sits in a private network.
-	RequireAuth bool `json:"require_auth,omitempty"`
+	// rejected. Default true when unset. Set to false only for trusted
+	// homogeneous fleets where the gateway sits in a private network.
+	RequireAuth *bool `json:"require_auth,omitempty"`
 
 	// JWKSURL is the URL serving the Countersig JWKS document. Defaults to
 	// {APIBase}/.well-known/jwks.json.
@@ -119,11 +119,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.FailMode == "" {
 		h.FailMode = FailClosed
 	}
-	if !h.RequireAuth && h.RequireAuth != false {
-		// Caddy zero-value is false; we want the documented default of true.
-		// Use an explicit pointer in JSON to override; for Caddyfile, see
-		// parseCaddyfile which sets this explicitly.
-	}
 	if h.RequestTimeout == 0 {
 		h.RequestTimeout = caddy.Duration(5 * time.Second)
 	}
@@ -162,7 +157,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		zapField("api_base", h.APIBase),
 		zapField("fail_mode", string(h.FailMode)),
 		zapField("cache_ttl", h.CacheTTLSeconds),
-		zapField("require_auth", h.RequireAuth),
+		zapField("require_auth", h.requireAuthEnabled()),
 	)
 	return nil
 }
@@ -181,7 +176,7 @@ func (h *Handler) Cleanup() error {
 func parseCaddyfile(helper httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	h := &Handler{
 		// Defaults that are non-zero values
-		RequireAuth: true,
+		RequireAuth: boolPtr(true),
 	}
 
 	for helper.Next() {
@@ -237,9 +232,9 @@ func parseCaddyfile(helper httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, e
 				}
 				switch v {
 				case "true":
-					h.RequireAuth = true
+					h.RequireAuth = boolPtr(true)
 				case "false":
-					h.RequireAuth = false
+					h.RequireAuth = boolPtr(false)
 				default:
 					return nil, fmt.Errorf("require_auth must be 'true' or 'false', got %q", v)
 				}
@@ -276,6 +271,17 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	}
 	*h = *parsed.(*Handler)
 	return nil
+}
+
+func (h *Handler) requireAuthEnabled() bool {
+	if h.RequireAuth == nil {
+		return true
+	}
+	return *h.RequireAuth
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 // Interface guards

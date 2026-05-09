@@ -45,9 +45,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 
 	// 3. Identity
-	agentID, _, err := h.authenticateAgent(r)
+	agentID, _, apiKeyOverride, err := h.authenticateAgent(r)
 	if err != nil {
-		if h.RequireAuth {
+		if h.requireAuthEnabled() {
 			authFailuresTotal.WithLabelValues(err.Error()).Inc()
 			h.deny(w, r, "auth_failed", "input", "enforced", err.Error())
 			return nil
@@ -78,7 +78,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	defer cancel()
 
 	start := time.Now()
-	decision, err := h.policyClient.Check(ctx, agentID, destination)
+	decision, err := h.policyClient.Check(ctx, agentID, destination, apiKeyOverride)
 	checkLatencySeconds.Observe(time.Since(start).Seconds())
 
 	if err != nil {
@@ -131,17 +131,17 @@ func (h *Handler) extractDestination(r *http.Request) (string, error) {
 // Fallback: X-Countersig-Agent header with API key (treated opaquely;
 // the backend validates it on /policy/check).
 //
-// Returns (agentID, orgID, nil) on success.
-func (h *Handler) authenticateAgent(r *http.Request) (string, string, error) {
+// Returns (agentID, orgID, apiKeyOverride, nil) on success.
+func (h *Handler) authenticateAgent(r *http.Request) (string, string, string, error) {
 	// Primary: Bearer JWT
 	authz := r.Header.Get("Authorization")
 	if strings.HasPrefix(authz, "Bearer ") {
 		token := strings.TrimPrefix(authz, "Bearer ")
 		claims, err := h.jwks.VerifyAgentJWT(r.Context(), token)
 		if err != nil {
-			return "", "", fmt.Errorf("invalid_jwt")
+			return "", "", "", fmt.Errorf("invalid_jwt")
 		}
-		return claims.AgentID, claims.OrgID, nil
+		return claims.AgentID, claims.OrgID, "", nil
 	}
 
 	// Fallback: API key header. We can't introspect it locally; the
@@ -157,16 +157,12 @@ func (h *Handler) authenticateAgent(r *http.Request) (string, string, error) {
 	if apiKey := r.Header.Get(HeaderAgent); apiKey != "" {
 		agentID := r.Header.Get(HeaderAgent + "-Id")
 		if agentID == "" {
-			return "", "", fmt.Errorf("missing_agent_id_header")
+			return "", "", "", fmt.Errorf("missing_agent_id_header")
 		}
-		// Stash the API key on the request for the backend call to use
-		// instead of the gateway's own service key. This is set on a
-		// per-request basis via context.
-		r = r.WithContext(context.WithValue(r.Context(), apiKeyOverrideKey{}, apiKey))
-		return agentID, "", nil
+		return agentID, "", apiKey, nil
 	}
 
-	return "", "", fmt.Errorf("no_credentials")
+	return "", "", "", fmt.Errorf("no_credentials")
 }
 
 // handleBackendError applies the configured fail_mode behavior.
@@ -269,6 +265,3 @@ func (h *Handler) deny(w http.ResponseWriter, r *http.Request, reason, scope, mo
 	_, _ = w.Write([]byte(body))
 }
 
-// apiKeyOverrideKey is the context key for overriding the gateway's
-// service API key with a per-request API key from the agent header.
-type apiKeyOverrideKey struct{}

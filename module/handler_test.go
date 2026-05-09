@@ -58,7 +58,7 @@ func makeHandler(t *testing.T, decision *PolicyDecision, backendErr error) (*Han
 		APIBase:        srv.URL,
 		APIKey:         "test-gateway-key",
 		FailMode:       FailClosed,
-		RequireAuth:    false, // tests inject identity manually
+		RequireAuth:    boolPtr(false), // tests inject identity manually
 		RequestTimeout: 5_000_000_000, // 5s as caddy.Duration (int64 ns)
 		cache:          cache,
 		policyClient:   newPolicyClient(srv.URL, "test-gateway-key", 5*time.Second),
@@ -110,7 +110,7 @@ func runWithIdentity(t *testing.T, h *Handler, r *http.Request, agentID string) 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	decision, err := h.policyClient.Check(ctx, agentID, dest)
+	decision, err := h.policyClient.Check(ctx, agentID, dest, "")
 	if err != nil {
 		_ = h.handleBackendError(rec, r, next, agentID, dest, err)
 		return rec, next
