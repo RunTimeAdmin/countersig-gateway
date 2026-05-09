@@ -4,6 +4,31 @@ Network-layer policy enforcement for AI agents registered with [Countersig](http
 
 This is a Caddy module that sits in front of your AI agents and enforces destination allow-lists at the network layer. Unlike the [`@countersig/policy-client`](https://www.npmjs.com/package/@countersig/policy-client) SDK — which can be bypassed by any code that doesn't route through it — the gateway sees all egress traffic and cannot be circumvented by a compromised agent.
 
+## What this is for (plain language)
+
+Use this when you need **non-bypassable egress control** for agent traffic.
+
+- SDK-only policy checks are app-level hints
+- Gateway policy checks are network-level enforcement
+- The gateway is for production trust boundaries, audit defensibility, and regulated environments
+
+## Is this deployed on a VPS?
+
+This repository is the **gateway component source code**, not an environment inventory.
+
+- It does **not** declare a specific production VPS host
+- It does **not** include Terraform/Ansible/Kubernetes deployment manifests
+- It does include runnable examples (forward proxy, reverse proxy, sidecar)
+
+If you cannot find a VPS hostname in your infra repo/secrets/runtime, it is likely not deployed yet in that environment.
+
+Where to check quickly:
+
+- Your VPS/container runtime: running `caddy`/`countersig-gateway` process
+- Environment variables: `COUNTERSIG_GATEWAY_API_KEY`, `HTTPS_PROXY`, `HTTP_PROXY`
+- Network path: agent egress routed through gateway `:8080`
+- Countersig backend logs: incoming `/v1/policy/check` calls from gateway instances
+
 ## When to use this
 
 Use the gateway when:
@@ -66,12 +91,12 @@ xcaddy build \
 ./caddy run --config Caddyfile
 ```
 
-### Option 3: Build from source
+### Option 3: Build from source (module tests)
 
 ```bash
 git clone https://github.com/RunTimeAdmin/countersig-gateway
 cd countersig-gateway
-go build -o caddy ./cmd/caddy
+go test ./module/...
 ```
 
 ## Configuration
@@ -135,6 +160,8 @@ X-Countersig-Agent: <api-key>
 X-Countersig-Agent-Id: <agent-uuid>
 ```
 For runtimes that can't easily set an `Authorization` header. The API key is treated opaquely — the backend validates it on the policy check call, and you can configure your existing API key permissions to constrain what agent IDs each key can act as.
+
+Note: API-key fallback decisions are intentionally not reused in the shared cache path; JWT-authenticated decisions are cache-eligible.
 
 ## Deployment patterns
 
