@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -60,18 +61,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return next.ServeHTTP(w, r)
 	}
 
+	cacheEligible := apiKeyOverride == ""
+
 	// 4. Cache
-	if cached, hit := h.cache.Get(agentID, destination); hit {
-		cacheHitsTotal.Inc()
-		return h.applyDecision(w, r, next, agentID, destination, &PolicyDecision{
-			Allowed: cached.Allowed,
-			Reason:  cached.Reason,
-			Scope:   cached.Scope,
-			Mode:    cached.Mode,
-			Token:   cached.Token,
-		})
+	if cacheEligible {
+		if cached, hit := h.cache.Get(agentID, destination); hit {
+			cacheHitsTotal.Inc()
+			return h.applyDecision(w, r, next, agentID, destination, &PolicyDecision{
+				Allowed: cached.Allowed,
+				Reason:  cached.Reason,
+				Scope:   cached.Scope,
+				Mode:    cached.Mode,
+				Token:   cached.Token,
+			})
+		}
+		cacheMissesTotal.Inc()
 	}
-	cacheMissesTotal.Inc()
 
 	// 5. Backend call
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(h.RequestTimeout))
@@ -82,17 +87,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	checkLatencySeconds.Observe(time.Since(start).Seconds())
 
 	if err != nil {
-		return h.handleBackendError(w, r, next, agentID, destination, err)
+		return h.handleBackendError(w, r, next, agentID, destination, cacheEligible, err)
 	}
 
-	// Cache the fresh decision
-	h.cache.Put(agentID, destination, &CachedDecision{
-		Allowed: decision.Allowed,
-		Reason:  decision.Reason,
-		Scope:   decision.Scope,
-		Mode:    decision.Mode,
-		Token:   decision.Token,
-	})
+	if cacheEligible {
+		// Cache only JWT-authenticated decisions so API-key fallback requests
+		// cannot poison shared cache keys by spoofing agent IDs.
+		h.cache.Put(agentID, destination, &CachedDecision{
+			Allowed: decision.Allowed,
+			Reason:  decision.Reason,
+			Scope:   decision.Scope,
+			Mode:    decision.Mode,
+			Token:   decision.Token,
+		})
+	}
 
 	return h.applyDecision(w, r, next, agentID, destination, decision)
 }
@@ -109,7 +117,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 func (h *Handler) extractDestination(r *http.Request) (string, error) {
 	// Reverse-proxy mode: explicit header
 	if upstream := r.Header.Get(HeaderTargetUpstream); upstream != "" {
-		return strings.TrimPrefix(strings.TrimPrefix(upstream, "https://"), "http://"), nil
+		upstream = strings.TrimSpace(upstream)
+		if upstream == "" {
+			return "", errors.New("X-Target-Upstream cannot be empty")
+		}
+
+		if strings.Contains(upstream, "://") {
+			parsed, err := url.Parse(upstream)
+			if err != nil || parsed.Host == "" {
+				return "", errors.New("invalid X-Target-Upstream URL")
+			}
+			return parsed.Host, nil
+		}
+
+		upstream = strings.SplitN(upstream, "/", 2)[0]
+		upstream = strings.SplitN(upstream, "?", 2)[0]
+		upstream = strings.SplitN(upstream, "#", 2)[0]
+		if upstream == "" {
+			return "", errors.New("invalid X-Target-Upstream value")
+		}
+		return upstream, nil
 	}
 
 	// Forward-proxy mode: CONNECT or absolute URI
@@ -171,6 +198,7 @@ func (h *Handler) handleBackendError(
 	r *http.Request,
 	next caddyhttp.Handler,
 	agentID, destination string,
+	allowStaleCache bool,
 	err error,
 ) error {
 	h.logger.Warn("policy backend call failed",
@@ -186,15 +214,17 @@ func (h *Handler) handleBackendError(
 
 	case FailCachedOnly:
 		// Use any cached decision regardless of TTL
-		if stale, ok := h.cache.GetStale(agentID, destination); ok {
-			backendErrorsTotal.WithLabelValues("stale_cache").Inc()
-			return h.applyDecision(w, r, next, agentID, destination, &PolicyDecision{
-				Allowed: stale.Allowed,
-				Reason:  stale.Reason + "_stale",
-				Scope:   stale.Scope,
-				Mode:    stale.Mode,
-				Token:   stale.Token,
-			})
+		if allowStaleCache {
+			if stale, ok := h.cache.GetStale(agentID, destination); ok {
+				backendErrorsTotal.WithLabelValues("stale_cache").Inc()
+				return h.applyDecision(w, r, next, agentID, destination, &PolicyDecision{
+					Allowed: stale.Allowed,
+					Reason:  stale.Reason + "_stale",
+					Scope:   stale.Scope,
+					Mode:    stale.Mode,
+					Token:   stale.Token,
+				})
+			}
 		}
 		backendErrorsTotal.WithLabelValues("deny").Inc()
 		h.deny(w, r, "backend_unreachable_no_cache", "input", "enforced", err.Error())

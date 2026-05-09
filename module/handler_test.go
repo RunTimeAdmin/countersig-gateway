@@ -112,7 +112,7 @@ func runWithIdentity(t *testing.T, h *Handler, r *http.Request, agentID string) 
 
 	decision, err := h.policyClient.Check(ctx, agentID, dest, "")
 	if err != nil {
-		_ = h.handleBackendError(rec, r, next, agentID, dest, err)
+		_ = h.handleBackendError(rec, r, next, agentID, dest, true, err)
 		return rec, next
 	}
 
@@ -327,6 +327,19 @@ func TestExtractDestinationReverseProxyHeader(t *testing.T) {
 	}
 }
 
+func TestExtractDestinationReverseProxyHeaderWithPath(t *testing.T) {
+	h := &Handler{}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.Header.Set(HeaderTargetUpstream, "https://api.openai.com/v1/chat/completions?model=gpt")
+	dest, err := h.extractDestination(r)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if dest != "api.openai.com" {
+		t.Fatalf("got %q", dest)
+	}
+}
+
 func TestStripsCountersigHeadersOnAllow(t *testing.T) {
 	registerMetrics()
 	h, srv := makeHandler(t, &PolicyDecision{
@@ -371,6 +384,63 @@ func TestInjectsA2ATokenForAgentDestinations(t *testing.T) {
 	got := r.Header.Get("Authorization")
 	if got != "Bearer minted-a2a-jwt" {
 		t.Fatalf("expected A2A token injected, got %q", got)
+	}
+}
+
+func TestAPIKeyFallbackDoesNotPoisonSharedCache(t *testing.T) {
+	registerMetrics()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authz := r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		if authz == "Bearer bad-agent-key" {
+			_ = json.NewEncoder(w).Encode(&PolicyDecision{
+				Allowed: false, Reason: "not_whitelisted", Scope: "org", Mode: "enforced",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(&PolicyDecision{
+			Allowed: true, Reason: "whitelisted", Scope: "org", Mode: "enforced",
+		})
+	}))
+	defer srv.Close()
+
+	cache, _ := newDecisionCache(100, 60*time.Second)
+	h := &Handler{
+		APIBase:        srv.URL,
+		APIKey:         "gateway-service-key",
+		FailMode:       FailClosed,
+		RequireAuth:    boolPtr(true),
+		RequestTimeout: 5_000_000_000,
+		cache:          cache,
+		policyClient:   newPolicyClient(srv.URL, "gateway-service-key", 5*time.Second),
+		logger:         testLogger(t),
+	}
+
+	// First request: API-key fallback with a bad key should deny.
+	badReq := requestWithDest(http.MethodGet, "api.openai.com")
+	badReq.Header.Set(HeaderAgent, "bad-agent-key")
+	badReq.Header.Set(HeaderAgent+"-Id", "agent-1")
+	badRec := httptest.NewRecorder()
+	badNext := &fakeNext{}
+	_ = h.ServeHTTP(badRec, badReq, badNext)
+	if badRec.Code != http.StatusForbidden {
+		t.Fatalf("expected fallback request to be denied, got %d", badRec.Code)
+	}
+
+	// Second request: same agent+destination but no fallback API key should
+	// not inherit the deny decision from cache and should pass.
+	goodReq := requestWithDest(http.MethodGet, "api.openai.com")
+	goodReq.Header.Set(HeaderAgent, "good-agent-key")
+	goodReq.Header.Set(HeaderAgent+"-Id", "agent-1")
+	goodRec := httptest.NewRecorder()
+	goodNext := &fakeNext{}
+	_ = h.ServeHTTP(goodRec, goodReq, goodNext)
+	if !goodNext.called {
+		t.Fatalf("expected allowed request to reach next handler")
+	}
+	if goodRec.Code != http.StatusOK {
+		t.Fatalf("expected fallback request to be allowed, got %d", goodRec.Code)
 	}
 }
 
