@@ -96,15 +96,17 @@ func registerMetrics() {
 
 // metricsHandler wraps a promhttp handler at a configurable path.
 type metricsHandler struct {
-	path    string
-	handler http.Handler
+	path        string
+	bearerToken string
+	handler     http.Handler
 }
 
-func newMetricsHandler(path string) *metricsHandler {
+func newMetricsHandler(path string, bearerToken string) *metricsHandler {
 	registerMetrics()
 	return &metricsHandler{
-		path:    path,
-		handler: promhttp.Handler(),
+		path:        path,
+		bearerToken: bearerToken,
+		handler:     promhttp.Handler(),
 	}
 }
 
@@ -113,5 +115,10 @@ func (m *metricsHandler) Matches(reqPath string) bool {
 }
 
 func (m *metricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if m.bearerToken != "" && r.Header.Get("Authorization") != "Bearer "+m.bearerToken {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("forbidden"))
+		return
+	}
 	m.handler.ServeHTTP(w, r)
 }

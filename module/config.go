@@ -5,6 +5,7 @@ package module
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -89,6 +90,10 @@ type Handler struct {
 	// listener at this path. Disabled by default.
 	MetricsPath string `json:"metrics_path,omitempty"`
 
+	// MetricsBearerToken protects the metrics endpoint using
+	// Authorization: Bearer <token>. Optional in non-production.
+	MetricsBearerToken string `json:"metrics_bearer_token,omitempty"`
+
 	// Internal state, populated during Provision.
 	cache         *decisionCache
 	jwks          *jwksVerifier
@@ -125,6 +130,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.JWKSURL == "" && h.APIBase != "" {
 		h.JWKSURL = h.APIBase + "/.well-known/jwks.json"
 	}
+	if h.MetricsBearerToken == "" {
+		h.MetricsBearerToken = os.Getenv("METRICS_SECRET")
+	}
 
 	// Validate
 	if h.APIBase == "" {
@@ -150,7 +158,11 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.policyClient = newPolicyClient(h.APIBase, h.APIKey, time.Duration(h.RequestTimeout))
 
 	if h.MetricsPath != "" {
-		h.metricsServer = newMetricsHandler(h.MetricsPath)
+		if (os.Getenv("NODE_ENV") == "production" || os.Getenv("COUNTERSIG_ENV") == "production") &&
+			h.MetricsBearerToken == "" {
+			return fmt.Errorf("metrics_bearer_token (or METRICS_SECRET env var) is required in production when metrics_path is enabled")
+		}
+		h.metricsServer = newMetricsHandler(h.MetricsPath, h.MetricsBearerToken)
 	}
 
 	h.logger.Info("countersig_policy provisioned",
@@ -250,6 +262,10 @@ func parseCaddyfile(helper httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, e
 				h.RequestTimeout = caddy.Duration(d)
 			case "metrics_path":
 				if !helper.AllArgs(&h.MetricsPath) {
+					return nil, helper.ArgErr()
+				}
+			case "metrics_bearer_token":
+				if !helper.AllArgs(&h.MetricsBearerToken) {
 					return nil, helper.ArgErr()
 				}
 			default:

@@ -17,6 +17,8 @@ const (
 	// signing both A2A tokens and policy bundles. The backend publishes
 	// this key in its JWKS at /.well-known/jwks.json.
 	CountersigBundleKID = "a2a-ed25519-1"
+	CountersigIssuer    = "countersig.com"
+	CountersigAudience  = "countersig-a2a"
 
 	jwksCacheMaxAge = 10 * time.Minute
 )
@@ -37,8 +39,8 @@ type jwksVerifier struct {
 	url string
 	mu  sync.RWMutex
 
-	keys      *jose.JSONWebKeySet
-	fetchedAt time.Time
+	keys       *jose.JSONWebKeySet
+	fetchedAt  time.Time
 	httpClient *http.Client
 }
 
@@ -57,6 +59,12 @@ func (v *jwksVerifier) VerifyAgentJWT(ctx context.Context, token string) (*Agent
 	if err != nil {
 		return nil, fmt.Errorf("parse jwt: %w", err)
 	}
+	if len(parsed.Headers) == 0 || parsed.Headers[0].KeyID == "" {
+		return nil, fmt.Errorf("token missing kid header")
+	}
+	if parsed.Headers[0].KeyID != CountersigBundleKID {
+		return nil, fmt.Errorf("unexpected kid %q", parsed.Headers[0].KeyID)
+	}
 
 	keys, err := v.getKeys(ctx)
 	if err != nil {
@@ -65,26 +73,27 @@ func (v *jwksVerifier) VerifyAgentJWT(ctx context.Context, token string) (*Agent
 
 	// The Countersig backend signs A2A tokens with kid 'a2a-ed25519-1'.
 	// Find that key and verify against it.
-	matched := keys.Key(CountersigBundleKID)
+	matched := keys.Key(parsed.Headers[0].KeyID)
 	if len(matched) == 0 {
-		// Fall back to trying each key (allows for future key rotation
-		// where backends might publish multiple kids during transitions).
-		matched = keys.Keys
+		return nil, fmt.Errorf("no key found for kid %q", parsed.Headers[0].KeyID)
 	}
 
 	var claims AgentClaims
+	var standard struct {
+		Audience any `json:"aud"`
+	}
 	var verified bool
-	var lastErr error
+	var verifyErr error
 	for _, key := range matched {
-		if err := parsed.Claims(key.Public(), &claims); err == nil {
-			verified = true
-			break
-		} else {
-			lastErr = err
+		if err := parsed.Claims(key.Public(), &claims, &standard); err != nil {
+			verifyErr = err
+			continue
 		}
+		verified = true
+		break
 	}
 	if !verified {
-		return nil, fmt.Errorf("verify signature: %w", lastErr)
+		return nil, fmt.Errorf("verify signature: %w", verifyErr)
 	}
 
 	if claims.AgentID == "" {
@@ -93,11 +102,37 @@ func (v *jwksVerifier) VerifyAgentJWT(ctx context.Context, token string) (*Agent
 	if claims.OrgID == "" {
 		return nil, fmt.Errorf("token missing org_id claim")
 	}
+	if claims.Issuer != CountersigIssuer {
+		return nil, fmt.Errorf("invalid issuer %q", claims.Issuer)
+	}
+	if !hasExpectedAudience(standard.Audience, CountersigAudience) {
+		return nil, fmt.Errorf("token missing required audience %q", CountersigAudience)
+	}
 	if claims.Expiry > 0 && time.Now().Unix() > claims.Expiry {
 		return nil, fmt.Errorf("token expired")
 	}
 
 	return &claims, nil
+}
+
+func hasExpectedAudience(audience any, expected string) bool {
+	switch aud := audience.(type) {
+	case string:
+		return aud == expected
+	case []any:
+		for _, item := range aud {
+			if value, ok := item.(string); ok && value == expected {
+				return true
+			}
+		}
+	case []string:
+		for _, value := range aud {
+			if value == expected {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // getKeys returns the cached JWKS, refreshing if older than jwksCacheMaxAge.
