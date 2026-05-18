@@ -46,6 +46,7 @@ func signAgentToken(
 	claims := map[string]any{
 		"agent_id": agentID,
 		"org_id":   orgID,
+		"sub":      agentID,
 		"iss":      issuer,
 		"aud":      audience,
 		"exp":      expiry.Unix(),
@@ -112,6 +113,38 @@ func TestVerifyAgentJWT_RejectsWrongIssuer(t *testing.T) {
 	_, verifyErr := verifier.VerifyAgentJWT(context.Background(), token)
 	if verifyErr == nil || !strings.Contains(verifyErr.Error(), "invalid issuer") {
 		t.Fatalf("expected invalid issuer error, got %v", verifyErr)
+	}
+}
+
+func TestVerifyAgentJWT_RejectsSubjectMismatch(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	verifier, server := makeJWKSVerifier(t, []jose.JSONWebKey{
+		{Key: pub, KeyID: CountersigBundleKID, Algorithm: string(jose.EdDSA), Use: "sig"},
+	})
+	defer server.Close()
+
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.EdDSA, Key: jose.JSONWebKey{Key: priv, KeyID: CountersigBundleKID}},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	token, err := jwt.Signed(signer).Claims(map[string]any{
+		"agent_id": "agent-123",
+		"org_id":   "org-456",
+		"sub":      "different-agent",
+		"iss":      CountersigIssuer,
+		"aud":      CountersigAudience,
+		"exp":      time.Now().Add(5 * time.Minute).Unix(),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	_, verifyErr := verifier.VerifyAgentJWT(context.Background(), token)
+	if verifyErr == nil || !strings.Contains(verifyErr.Error(), "subject must match agent_id") {
+		t.Fatalf("expected subject mismatch error, got %v", verifyErr)
 	}
 }
 

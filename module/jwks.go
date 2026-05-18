@@ -102,6 +102,9 @@ func (v *jwksVerifier) VerifyAgentJWT(ctx context.Context, token string) (*Agent
 	if claims.OrgID == "" {
 		return nil, fmt.Errorf("token missing org_id claim")
 	}
+	if claims.Subject == "" || claims.Subject != claims.AgentID {
+		return nil, fmt.Errorf("token subject must match agent_id")
+	}
 	if claims.Issuer != CountersigIssuer {
 		return nil, fmt.Errorf("invalid issuer %q", claims.Issuer)
 	}
